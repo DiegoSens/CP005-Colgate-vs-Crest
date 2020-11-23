@@ -1,0 +1,257 @@
+---
+title: "CP05 - Colgate vs. Crest"
+author: "Diego Senso González"
+date: "23/11/2020"
+output:
+  html_document:
+    theme: united
+    df_print: paged
+    toc: yes
+    toc_depth: 5
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+---
+
+## Objetivo
+El objetivo del presente informe es predecir las ventas de Colgate y Crest de las 16 semanas del año 1963. Para ello, se incluirá un modelo ARIMA, se detectarán outliers y se realizará un modelo de intervención, entre otros.
+
+Cargamos las librerías necesarias.
+```{r warning=FALSE, echo=FALSE, message=FALSE}
+library(tidyverse)
+library(broom)
+library(flextable)
+library(mgcv)
+library(reshape2)
+library(readr)
+library(ggplot2)
+library(skimr)
+library(imputeTS)
+require(forecast)
+require(xts)
+library(ggfortify)
+library(rmdformats)
+library(TSA)
+library(zoo)
+library(Hmisc)
+library(astsa)
+```
+
+## Carga de los datos y tratamiento y limpieza
+
+Se carga el dataset que contiene los datos trimestrales de las ventas de Apple y se comprueba si existen datos NA o duplicados.
+
+```{r results='hide', echo=FALSE}
+rawData <- read.csv("data.csv", sep = ";")
+
+#Posible existencia de NAs
+sum(is.na(rawData))
+
+#Posible existencia de duplicados
+nrow(rawData[duplicated(rawData),])
+```
+
+No existen ni NAs ni duplicados en el dataframe.
+
+## Tratamiento y visualización del dataframe
+
+Antes de pasar al tratamiento, podemos realizar una primera observación numérica de los datos de ambas empresas gracias a la función "skim".
+
+```{r echo=FALSE}
+skim(rawData[,3:4])
+```
+
+A pesar de que la media más alta la tiene Colgate, el punto máximo del periodo recogido es registrado por Crest.
+
+A continuación, se extraen los datos de cada una de las dos empresas. Se crea un vector de fechas que va entre los periodos de los cuales hay datos. Dicho vector irá por semanas, ya que las ventas se ofrecen de forma semanal. Se crean los objetos xts y se ordenan los datos por fecha. Posteriormente, se pasa a formato zoo.
+
+```{r echo=FALSE}
+
+#Extraccion de los datos de cada empresa
+crest <- rawData$Crest
+colgate <- rawData$Colgate
+
+#Vector de fechas separado por semanas
+rawDate <- seq(as.Date('1958-01-08'), as.Date('1963-04-23'), by = 'week')
+
+#Archivo xts de Cogate, ordenado por fechas y semanalmente
+xColgate <- xts(colgate, order.by = rawDate)
+xColgate <- to.weekly(xColgate) 
+
+#Archivo xts Crest ordenado por fechas y semanalmente
+xCrest <- xts(crest, order.by = rawDate)
+xCrest <- to.weekly(xCrest)
+
+#Transformación en formato zoo
+zColgate <- as.zoo(xColgate$xColgate.Close)
+zCrest <- as.zoo(xCrest$xCrest.Close)
+
+#names(zColgate) <- 'Ventas'
+#names(zCrest) <- 'Ventas'
+
+```
+
+Visualizamos los datos de ambas empresas:
+
+```{r echo=FALSE}
+#Creación del gráfico
+autoplot(zColgate)+geom_line()+
+  ylab("Ventas")+ggtitle("Ventas semanales Colgate")+xlab("Semanas")
+
+autoplot(zCrest)+geom_line()+
+  ylab("Ventas")+ggtitle("Ventas semanales Crest")+xlab("Semanas")
+```
+
+En el gráfico se puede observar el comportamiento de cada una de las dos series. Salta a la vista el suceso del 1 de agosto de 1960, en el que la American Dental Association consideraba a Crest como bueno para la higiene dental. En la gráfica de Colgate, se percibe un claro descenso al afectarle directamente esta noticia, mientras que en Crest se destaca un claro aumento de sus ventas.
+
+
+## Modelos ARIMA
+
+Para estimar el modelo ARIMA creamos los conjuntos de train o entrenamiento de cada empresa. La fecha se elige para dejar fuera las 16 últimas semanas, que son las que se trata de predecir y que serán la parte de test.
+
+```{r echo=FALSE}
+trainColgate <- window(zColgate, end = "1962-12-26")
+trainCrest <-  window(zCrest, end = "1962-12-26")
+```
+
+Ahora se representan los resultados de ambos modelos.
+
+```{r echo=FALSE}
+#Modleo ARIMA de Colgate
+arima_colgate <- auto.arima(trainColgate)
+summary(arima_colgate)
+
+#Modelo ARIMA de Crest
+arima_crest <- auto.arima(trainCrest)
+summary(arima_crest)
+
+```
+
+Tras esto, se pueden visualizar los errores de ambos modelos. Es especialmente relevante el gráfico de ACF, que expondrá si los residuos son ruido blanco, como es deseable.
+
+```{r echo=FALSE}
+ggtsdisplay(arima_colgate$residuals) #Residuos del modelo ARIMA de Colgate
+ggtsdisplay(arima_crest$residuals) #Residuos del modelo ARIMA de Crest
+```
+
+Dado que los lag no sobrepasan la línea discontinua azul, cabe concluir que en ambos casos los residuos son ruido blanco, por lo que el modelo es correcto.
+
+
+## Outliers
+
+Los outliers puede ser aditivos (si afectan a la serie temporal) o innovativos (si afectan al error). Habrá que buscar los dos para las dos series temporales que tenemos. Para ello, se tratan de detectar sobre los modelos ARIMA previamente definidos.
+
+```{r echo=FALSE}
+detectAO(arima_colgate)
+detectIO(arima_colgate)
+
+detectAO(arima_crest)
+detectIO(arima_crest)
+
+```
+
+A juzgar por lo resultados, existen outliers aditivos de la serie de ventas de Crest en sus observaciones 135, 136 y 138. Son outliers que afectan a la serie temporal. Por ello, habrá que tratarlos siguiendo el modelo de intervención. 
+
+## Modelo de intervención
+
+Al ser un outlier aditivo, habrá que tratarlo con un análisis de intervención de tipo escalón (E911). Además, se incluyen los outliers también de las obs 136 y 138. Se define un modelo ARIMAX con todo ello.
+
+```{r echo=FALSE}
+arimax_crest = arimax(trainCrest, order = c(0, 1, 1), 
+                      xtransf = data.frame(E911 = 1*(seq(trainCrest) >= 135)),
+                      xreg = data.frame(E911 = 1*(seq(trainCrest) == 136),
+                                        E911 = 1*(seq(trainCrest) == 138)),
+                      transfer = list(c(0,0)),
+                      method = 'ML')
+
+arimax_crest
+```
+
+El dato -0.7445 habla de cómo ha cambiado la media móvil tras el tratamiento.
+
+
+## Modelo de función de transferencia
+
+Para realizar la función de transferencia se considera la observación 135 como el corte a partir del cual observar diferencias entre las series. Se crea un primer lugar un objeto de cada serie con los datos de ventas, y luego otro con las diferencias de cada semana respecto a la anterior.
+
+```{r echo=FALSE}
+colgate_134<-window(trainColgate,end = 134)
+crest_134<-window(trainCrest,end = 134)
+
+colgate_134_D <- diff(colgate_134)
+crest_134_D <- diff(crest_134)
+```
+
+Se crea un modelo ARIMAX en el que se relaciona la serie temporal de Colgate con respecto a la de Crest.
+
+```{r echo=FALSE}
+mod0 <- arimax(colgate_134,
+              order=c(0,1,1),
+              include.mean=TRUE,
+              xtransf=crest_134,
+              transfer=list(c(0,15)),
+              method="ML")
+
+summary(mod0)
+```
+
+Se grafican los residuos de este modelo. Como se puede observar, son ruido blanco.
+
+```{r echo=FALSE, warning=FALSE}
+ggtsdisplay(mod0$residuals)
+```
+
+Ahora se repite el proceso pero el modelo ARIMAX se define con el vector de valores que contiene las diferencias de cada empresa.
+
+```{r echo=FALSE}
+mod1 <- arimax(colgate_134_D,
+              order=c(0,1,1),
+              include.mean=TRUE,
+              xtransf=crest_134_D,
+              transfer=list(c(1,3)),
+              method="ML")
+
+summary(mod1)
+```
+
+Se grafican también lo residuos de este modelo:
+
+```{r echo=FALSE, warning=FALSE}
+ggtsdisplay(mod1$residuals)
+```
+
+```{r echo=FALSE}
+plot(mod0$coef[0:15],type="h")
+```
+
+Observando la última gráfica, cabría considerar el valor de S=2 dado que la caída parece complicada, pues parece que la hay y no es exponencial.
+
+
+```{r echo=FALSE}
+mod <- arimax(colgate_134_D,
+              order=c(0,1,1),
+              include.mean=TRUE,
+              fixed=c(NA,NA,0,0,0,NA),
+              xtransf=crest_134_D,
+              transfer=list(c(1,3)),
+              method="ML")
+
+summary(mod)
+```
+
+
+Se han seleccionado para ser estimados una serie de parámetros, mientras que en los otros se les ha dado el valor de cero. De esta forma, estima la media móvil y los parámetros marcados con el valor NA. Tanto de los resultados de este último modelo como de los anteriores ARIMAX, se concluye que dado que los coeficientes presentan valores negativos, las ventas de Crest tienen un efecto negativo sobre las de Colgate. Esto es debido al suceso que se comentaba al comienzo, cuando la ADA recomendó la marca Crest.
+
+## Predicción
+
+Se procede a predecir con al modelo ARIMA creado anteriomente. El resultado se muestra gráficamente.
+
+```{r echo=FALSE}
+pred_crest <- forecast(trainCrest, h = 16)
+plot(pred_crest)
+
+pred_colgate <- forecast(trainColgate, h = 16)
+plot(pred_colgate)
+```
+
+
